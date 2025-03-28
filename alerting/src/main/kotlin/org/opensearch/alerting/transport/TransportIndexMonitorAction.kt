@@ -38,6 +38,7 @@ import org.opensearch.alerting.settings.AlertingSettings.Companion.ALERTING_MAX_
 import org.opensearch.alerting.settings.AlertingSettings.Companion.INDEX_TIMEOUT
 import org.opensearch.alerting.settings.AlertingSettings.Companion.MAX_ACTION_THROTTLE_VALUE
 import org.opensearch.alerting.settings.AlertingSettings.Companion.REQUEST_TIMEOUT
+import org.opensearch.alerting.settings.AlertingSettings.Companion.STORAGE_ENGINE
 import org.opensearch.alerting.settings.DestinationSettings.Companion.ALLOW_LIST
 import org.opensearch.alerting.util.DocLevelMonitorQueries
 import org.opensearch.alerting.util.IndexUtils
@@ -68,6 +69,11 @@ import org.opensearch.commons.alerting.model.remote.monitors.RemoteDocLevelMonit
 import org.opensearch.commons.alerting.util.AlertingException
 import org.opensearch.commons.alerting.util.isMonitorOfStandardType
 import org.opensearch.commons.authuser.User
+import org.opensearch.commons.storage.api.StorageEngine
+import org.opensearch.commons.storage.api.StorageOperation
+import org.opensearch.commons.storage.core.StorageService
+import org.opensearch.commons.storage.model.StorageRequest
+import org.opensearch.commons.storage.model.StorageResponse
 import org.opensearch.commons.utils.recreateObject
 import org.opensearch.core.action.ActionListener
 import org.opensearch.core.common.io.stream.NamedWriteableRegistry
@@ -83,9 +89,12 @@ import org.opensearch.search.builder.SearchSourceBuilder
 import org.opensearch.tasks.Task
 import org.opensearch.transport.TransportService
 import org.opensearch.transport.client.Client
+import software.amazon.awssdk.services.dynamodb.model.AttributeValue
+import software.amazon.awssdk.services.dynamodb.model.PutItemRequest
 import java.io.IOException
 import java.time.Duration
 import java.util.Locale
+import java.util.UUID
 
 private val log = LogManager.getLogger(TransportIndexMonitorAction::class.java)
 private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO)
@@ -100,6 +109,7 @@ class TransportIndexMonitorAction @Inject constructor(
     val settings: Settings,
     val xContentRegistry: NamedXContentRegistry,
     val namedWriteableRegistry: NamedWriteableRegistry,
+    val storageService: StorageService
 ) : HandledTransportAction<ActionRequest, IndexMonitorResponse>(
     AlertingActions.INDEX_MONITOR_ACTION_NAME, transportService, actionFilters, ::IndexMonitorRequest
 ),
@@ -111,6 +121,7 @@ class TransportIndexMonitorAction @Inject constructor(
     @Volatile private var maxActionThrottle = MAX_ACTION_THROTTLE_VALUE.get(settings)
     @Volatile private var allowList = ALLOW_LIST.get(settings)
     @Volatile override var filterByEnabled = AlertingSettings.FILTER_BY_BACKEND_ROLES.get(settings)
+    @Volatile private var storageEngineSetting = STORAGE_ENGINE.get(settings)
 
     init {
         clusterService.clusterSettings.addSettingsUpdateConsumer(ALERTING_MAX_MONITORS) { maxMonitors = it }
@@ -466,15 +477,15 @@ class TransportIndexMonitorAction @Inject constructor(
 
         private fun onUpdateMappingsResponse(response: AcknowledgedResponse) {
             if (response.isAcknowledged) {
-                log.info("Updated  ${ScheduledJob.SCHEDULED_JOBS_INDEX} with mappings.")
+                log.info("Updated  $SCHEDULED_JOBS_INDEX with mappings.")
                 IndexUtils.scheduledJobIndexUpdated()
                 prepareMonitorIndexing()
             } else {
-                log.info("Update ${ScheduledJob.SCHEDULED_JOBS_INDEX} mappings call not acknowledged.")
+                log.info("Update $SCHEDULED_JOBS_INDEX mappings call not acknowledged.")
                 actionListener.onFailure(
                     AlertingException.wrap(
                         OpenSearchStatusException(
-                            "Updated ${ScheduledJob.SCHEDULED_JOBS_INDEX} mappings call not acknowledged.",
+                            "Updated $SCHEDULED_JOBS_INDEX mappings call not acknowledged.",
                             RestStatus.INTERNAL_SERVER_ERROR
                         )
                     )
@@ -496,9 +507,10 @@ class TransportIndexMonitorAction @Inject constructor(
                 log.debug("Created monitor's backend roles: $rbacRoles")
             }
 
+            val monitorJson = request.monitor.toXContentWithUser(jsonBuilder(), ToXContent.MapParams(mapOf("with_type" to "true")))
             val indexRequest = IndexRequest(SCHEDULED_JOBS_INDEX)
                 .setRefreshPolicy(request.refreshPolicy)
-                .source(request.monitor.toXContentWithUser(jsonBuilder(), ToXContent.MapParams(mapOf("with_type" to "true"))))
+                .source(monitorJson)
                 .setIfSeqNo(request.seqNo)
                 .setIfPrimaryTerm(request.primaryTerm)
                 .timeout(indexTimeout)
@@ -511,7 +523,11 @@ class TransportIndexMonitorAction @Inject constructor(
             )
 
             try {
-                val indexResponse: IndexResponse = client.suspendUntil { client.index(indexRequest, it) }
+                val storageRequest = createIndexMonitorRequest(indexRequest)
+                val storageResponse = storageService.handleRequest(storageRequest)
+                val indexResponse = createIndexMonitorResponse(storageResponse) as IndexResponse
+
+//                val indexResponse: IndexResponse = client.suspendUntil { client.index(indexRequest, it) }
                 val failureReasons = checkShardsFailure(indexResponse)
                 if (failureReasons != null) {
                     log.info(failureReasons.toString())
@@ -753,5 +769,44 @@ class TransportIndexMonitorAction @Inject constructor(
             }
             return null
         }
+
+        // when you create a request, you want to check the setting to decide what kind of request you need to create
+        private fun createIndexMonitorRequest(request: IndexRequest): StorageRequest<Any> {
+            val storageEngine = requireNotNull(storageEngineSetting) // to prevent volatile
+            val payload: Any = when (storageEngine) {
+                StorageEngine.OPEN_SEARCH_CLUSTER -> request
+                StorageEngine.DYNAMO_DB -> {
+                    val monitorJson = String(request.source().utf8ToString().toByteArray())
+                    val item = mapOf(
+                        "id" to AttributeValue.builder().s(UUID.randomUUID().toString()).build(),
+                        "monitorJson" to AttributeValue.builder().s(monitorJson).build(),
+                        "type" to AttributeValue.builder().s("Monitor").build(),
+                        "timestamp" to AttributeValue.builder().s(System.currentTimeMillis().toString()).build()
+                    )
+                    PutItemRequest.builder()
+                        .tableName("Alerting")
+                        .item(item)
+                        .build()
+                }
+            }
+            return StorageRequest(
+                payload = payload,
+                operation = StorageOperation.SAVE,
+                engine = storageEngine
+            )
+        }
+
+        // when you receive a response, you don't care about the setting because, the response already contains it's engine type
+        private fun createIndexMonitorResponse(response: StorageResponse<Any>): Any {
+            return when (response.engine) {
+                StorageEngine.OPEN_SEARCH_CLUSTER -> response.payload as IndexResponse
+                StorageEngine.DYNAMO_DB -> {
+                    TODO("The payload will be PutItemResponse")
+                    // to confirm with subho : How should it gel with the rest of the code in Transport index monitor action?
+                }
+            }
+        }
+
+        // Intro, Arch, class diagram - Alerting and common utils
     }
 }

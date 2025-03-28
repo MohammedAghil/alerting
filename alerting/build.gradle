@@ -107,7 +107,7 @@ configurations.all {
         force "commons-codec:commons-codec:1.13"
 
         force "org.slf4j:slf4j-api:${versions.slf4j}" //Needed for http5
-        
+
         // This is required because kotlin-coroutines-core 1.1.1 still requires kotlin stdlib 1.3.20 and we're using a higher kotlin version
         force "org.jetbrains.kotlin:kotlin-stdlib:${kotlin_version}"
         force "org.jetbrains.kotlin:kotlin-stdlib-common:${kotlin_version}"
@@ -168,6 +168,19 @@ dependencies {
     implementation "org.jetbrains:annotations:13.0"
 
     api project(":alerting-core")
+    api project(":storage")
+    implementation("software.amazon.awssdk:dynamodb:2.25.0")
+    implementation("software.amazon.awssdk:utils:2.25.0")
+    implementation("software.amazon.awssdk:auth:2.25.0")
+    implementation("software.amazon.awssdk:regions:2.25.0")
+    implementation("software.amazon.awssdk:sdk-core:2.25.0")
+    implementation("software.amazon.awssdk:aws-core:2.25.0")
+    implementation("software.amazon.awssdk:http-client-spi:2.25.0")
+    implementation("software.amazon.awssdk:identity-spi:2.25.0")
+    implementation("software.amazon.awssdk:profiles:2.25.0")
+    implementation("software.amazon.awssdk:endpoints-spi:2.25.0")
+    implementation("software.amazon.awssdk:http-auth-spi:2.25.0")
+
     implementation "com.github.seancfoley:ipaddress:5.4.1"
     implementation project(path: ":alerting-spi", configuration: 'shadow')
 
@@ -358,15 +371,17 @@ String baseName = "alertingBwcCluster"
             testDistribution = "ARCHIVE"
             versions = [bwcOpenSearchVersion, opensearch_version]
             numberOfNodes = 3
-            plugin(provider(new Callable<RegularFile>(){
+            plugin(provider(new Callable<RegularFile>() {
                 @Override
                 RegularFile call() throws Exception {
                     return new RegularFile() {
                         @Override
                         File getAsFile() {
-                            return configurations.zipArchive.asFileTree.matching {
-                                include '**/alerting*'
-                            }.singleFile
+                            return configurations.opensearchPlugin.resolvedConfiguration.resolvedArtifacts
+                                    .find { ResolvedArtifact f ->
+                                        f.name.startsWith("alerting")
+                                    }
+                                    .file
                         }
                     }
                 }

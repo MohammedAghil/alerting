@@ -7,6 +7,7 @@ rootProject.name = 'opensearch-alerting'
 include 'alerting'
 include 'core'
 include 'spi'
+include 'storage'
 
 project(":core").name = 'alerting-core'
 project(":spi").name = 'alerting-spi'
@@ -14,3 +15,10 @@ project(":spi").name = 'alerting-spi'
 include 'sample-remote-monitor-plugin'
 project(":sample-remote-monitor-plugin").name = "alerting-sample-remote-monitor-plugin"
 // startParameter.excludedTaskNames=["generatePomFileForShadowPublication"]
+
+includeBuild("../../common-utils-private-remote/common-utils") {
+    dependencySubstitution {
+        substitute(module("org.opensearch:common-utils"))
+                .using(project(":"))
+    }
+}

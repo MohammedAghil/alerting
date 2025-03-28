@@ -59,6 +59,8 @@ import org.opensearch.alerting.settings.DestinationSettings
 import org.opensearch.alerting.settings.LegacyOpenDistroAlertingSettings
 import org.opensearch.alerting.settings.LegacyOpenDistroDestinationSettings
 import org.opensearch.alerting.spi.RemoteMonitorRunnerExtension
+import org.opensearch.alerting.storage.OpenSearchStorageRepository
+import org.opensearch.alerting.storage.core.StorageAdapterFactoryImpl
 import org.opensearch.alerting.transport.TransportAcknowledgeAlertAction
 import org.opensearch.alerting.transport.TransportAcknowledgeChainedAlertAction
 import org.opensearch.alerting.transport.TransportDeleteAlertingCommentAction
@@ -109,6 +111,8 @@ import org.opensearch.commons.alerting.model.ScheduledJob.Companion.SCHEDULED_JO
 import org.opensearch.commons.alerting.model.SearchInput
 import org.opensearch.commons.alerting.model.Workflow
 import org.opensearch.commons.alerting.model.remote.monitors.RemoteMonitorTrigger
+import org.opensearch.commons.storage.api.StorageEngine
+import org.opensearch.commons.storage.core.StorageService
 import org.opensearch.core.action.ActionResponse
 import org.opensearch.core.common.io.stream.NamedWriteableRegistry
 import org.opensearch.core.common.io.stream.StreamInput
@@ -182,6 +186,7 @@ internal class AlertingPlugin : PainlessExtension, ActionPlugin, ScriptPlugin, R
     lateinit var alertIndices: AlertIndices
     lateinit var clusterService: ClusterService
     lateinit var destinationMigrationCoordinator: DestinationMigrationCoordinator
+    lateinit var storageService: StorageService
     var monitorTypeToMonitorRunners: MutableMap<String, RemoteMonitorRegistry> = mutableMapOf()
 
     override fun getRestHandlers(
@@ -324,6 +329,18 @@ internal class AlertingPlugin : PainlessExtension, ActionPlugin, ScriptPlugin, R
         destinationMigrationCoordinator = DestinationMigrationCoordinator(client, clusterService, threadPool, scheduledJobIndices)
         this.threadPool = threadPool
         this.clusterService = clusterService
+//        val dynamoDbClient = DynamoDbClient.builder()
+//            .region(Region.US_EAST_1)
+//            .credentialsProvider(EnvironmentVariableCredentialsProvider.create())
+//            .build()
+
+        val storageAdapterFactory = StorageAdapterFactoryImpl(
+            mapOf(
+                StorageEngine.OPEN_SEARCH_CLUSTER to OpenSearchStorageRepository(client)
+//                StorageEngine.DYNAMO_DB to DynamoDbStorageRepository(dynamoDbClient)
+            )
+        )
+        storageService = StorageService(storageAdapterFactory)
 
         MonitorMetadataService.initialize(
             client,
@@ -351,7 +368,8 @@ internal class AlertingPlugin : PainlessExtension, ActionPlugin, ScriptPlugin, R
             destinationMigrationCoordinator,
             lockService,
             alertService,
-            triggerService
+            triggerService,
+            storageService
         )
     }
 

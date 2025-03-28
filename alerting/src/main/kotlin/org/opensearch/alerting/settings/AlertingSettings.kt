@@ -8,6 +8,7 @@ package org.opensearch.alerting.settings
 import org.opensearch.alerting.AlertingPlugin
 import org.opensearch.common.settings.Setting
 import org.opensearch.common.unit.TimeValue
+import org.opensearch.commons.storage.api.StorageEngine
 import java.util.concurrent.TimeUnit
 
 /**
@@ -273,6 +274,13 @@ class AlertingSettings {
             "plugins.alerting.max_comments_per_notification",
             3,
             0,
+            Setting.Property.NodeScope, Setting.Property.Dynamic
+        )
+
+        val STORAGE_ENGINE = Setting(
+            "plugins.alerting.storage_engine",
+            StorageEngine.OPEN_SEARCH_CLUSTER.name,
+            { StorageEngine.valueOf(it.uppercase()) },
             Setting.Property.NodeScope, Setting.Property.Dynamic
         )
     }
