@@ -19,9 +19,7 @@ import org.opensearch.action.admin.cluster.health.ClusterHealthAction
 import org.opensearch.action.admin.cluster.health.ClusterHealthRequest
 import org.opensearch.action.admin.cluster.health.ClusterHealthResponse
 import org.opensearch.action.admin.indices.create.CreateIndexResponse
-import org.opensearch.action.get.GetRequest
 import org.opensearch.action.get.GetResponse
-import org.opensearch.action.index.IndexRequest
 import org.opensearch.action.index.IndexResponse
 import org.opensearch.action.search.SearchRequest
 import org.opensearch.action.search.SearchResponse
@@ -44,6 +42,7 @@ import org.opensearch.alerting.util.IndexUtils
 import org.opensearch.alerting.util.addUserBackendRolesFilter
 import org.opensearch.alerting.util.getRoleFilterEnabled
 import org.opensearch.alerting.util.isADMonitor
+import org.opensearch.alerting.util.suspendUntil
 import org.opensearch.alerting.util.use
 import org.opensearch.cluster.service.ClusterService
 import org.opensearch.common.inject.Inject
@@ -78,6 +77,8 @@ import org.opensearch.index.query.QueryBuilders
 import org.opensearch.index.reindex.BulkByScrollResponse
 import org.opensearch.index.reindex.DeleteByQueryAction
 import org.opensearch.index.reindex.DeleteByQueryRequestBuilder
+import org.opensearch.remote.metadata.client.GetDataObjectRequest
+import org.opensearch.remote.metadata.client.PutDataObjectRequest
 import org.opensearch.remote.metadata.client.SdkClient
 import org.opensearch.rest.RestRequest
 import org.opensearch.search.builder.SearchSourceBuilder
@@ -482,12 +483,13 @@ class TransportIndexMonitorAction @Inject constructor(
                 log.debug("Created monitor's backend roles: $rbacRoles")
             }
 
-            val indexRequest = IndexRequest(SCHEDULED_JOBS_INDEX)
-                .setRefreshPolicy(request.refreshPolicy)
-                .source(request.monitor.toXContentWithUser(jsonBuilder(), ToXContent.MapParams(mapOf("with_type" to "true"))))
-                .setIfSeqNo(request.seqNo)
-                .setIfPrimaryTerm(request.primaryTerm)
-                .timeout(indexTimeout)
+            val putRequest = PutDataObjectRequest.builder()
+                .index(SCHEDULED_JOBS_INDEX)
+                .dataObject({ builder, _ -> request.monitor.toXContentWithUser(builder, ToXContent.MapParams(mapOf("with_type" to "true"))) })
+                .id(request.monitorId)
+                .ifSeqNo(request.seqNo)
+                .ifPrimaryTerm(request.primaryTerm)
+                .build()
 
             log.info(
                 "Creating new monitor: ${request.monitor.toXContentWithUser(
@@ -497,7 +499,7 @@ class TransportIndexMonitorAction @Inject constructor(
             )
 
             try {
-                val indexResponse: IndexResponse = client.suspendUntil { client.index(indexRequest, it) }
+                val indexResponse: IndexResponse = sdkClient.suspendUntil { sdkClient.putDataObjectAsync(putRequest).whenComplete(it) }
                 val failureReasons = checkShardsFailure(indexResponse)
                 if (failureReasons != null) {
                     log.info(failureReasons.toString())
@@ -585,9 +587,12 @@ class TransportIndexMonitorAction @Inject constructor(
         }
 
         private suspend fun updateMonitor() {
-            val getRequest = GetRequest(SCHEDULED_JOBS_INDEX, request.monitorId)
+            val getRequest = GetDataObjectRequest.builder()
+                .index(SCHEDULED_JOBS_INDEX)
+                .id(request.monitorId)
+                .build()
             try {
-                val getResponse: GetResponse = client.suspendUntil { client.get(getRequest, it) }
+                val getResponse: GetResponse = sdkClient.suspendUntil { sdkClient.getDataObjectAsync(getRequest).whenComplete(it) }
                 if (!getResponse.isExists) {
                     actionListener.onFailure(
                         AlertingException.wrap(
@@ -654,13 +659,14 @@ class TransportIndexMonitorAction @Inject constructor(
             }
 
             request.monitor = request.monitor.copy(schemaVersion = IndexUtils.scheduledJobIndexSchemaVersion)
-            val indexRequest = IndexRequest(SCHEDULED_JOBS_INDEX)
-                .setRefreshPolicy(request.refreshPolicy)
-                .source(request.monitor.toXContentWithUser(jsonBuilder(), ToXContent.MapParams(mapOf("with_type" to "true"))))
+
+            val putRequest = PutDataObjectRequest.builder()
+                .index(SCHEDULED_JOBS_INDEX)
+                .dataObject({ builder, _ -> request.monitor.toXContentWithUser(builder, ToXContent.MapParams(mapOf("with_type" to "true"))) })
                 .id(request.monitorId)
-                .setIfSeqNo(request.seqNo)
-                .setIfPrimaryTerm(request.primaryTerm)
-                .timeout(indexTimeout)
+                .ifSeqNo(request.seqNo)
+                .ifPrimaryTerm(request.primaryTerm)
+                .build()
 
             log.info(
                 "Updating monitor, ${currentMonitor.id}, from: ${currentMonitor.toXContentWithUser(
@@ -670,7 +676,7 @@ class TransportIndexMonitorAction @Inject constructor(
             )
 
             try {
-                val indexResponse: IndexResponse = client.suspendUntil { client.index(indexRequest, it) }
+                val indexResponse: IndexResponse = sdkClient.suspendUntil { sdkClient.putDataObjectAsync(putRequest).whenComplete(it) }
                 val failureReasons = checkShardsFailure(indexResponse)
                 if (failureReasons != null) {
                     actionListener.onFailure(
