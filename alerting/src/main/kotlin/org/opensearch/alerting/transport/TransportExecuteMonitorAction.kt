@@ -11,7 +11,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.apache.logging.log4j.LogManager
 import org.opensearch.OpenSearchStatusException
-import org.opensearch.action.get.GetRequest
 import org.opensearch.action.get.GetResponse
 import org.opensearch.action.support.ActionFilters
 import org.opensearch.action.support.HandledTransportAction
@@ -39,6 +38,9 @@ import org.opensearch.commons.authuser.User
 import org.opensearch.core.action.ActionListener
 import org.opensearch.core.rest.RestStatus
 import org.opensearch.core.xcontent.NamedXContentRegistry
+import org.opensearch.remote.metadata.client.GetDataObjectRequest
+import org.opensearch.remote.metadata.client.SdkClient
+import org.opensearch.remote.metadata.common.SdkClientUtils
 import org.opensearch.tasks.Task
 import org.opensearch.transport.TransportService
 import org.opensearch.transport.client.Client
@@ -56,7 +58,8 @@ class TransportExecuteMonitorAction @Inject constructor(
     actionFilters: ActionFilters,
     val xContentRegistry: NamedXContentRegistry,
     private val docLevelMonitorQueries: DocLevelMonitorQueries,
-    private val settings: Settings
+    private val settings: Settings,
+    private val sdkClient: SdkClient
 ) : HandledTransportAction<ExecuteMonitorRequest, ExecuteMonitorResponse> (
     ExecuteMonitorAction.NAME, transportService, actionFilters, ::ExecuteMonitorRequest
 ) {
@@ -101,10 +104,13 @@ class TransportExecuteMonitorAction @Inject constructor(
             }
 
             if (execMonitorRequest.monitorId != null) {
-                val getRequest = GetRequest(ScheduledJob.SCHEDULED_JOBS_INDEX).id(execMonitorRequest.monitorId)
-                client.get(
-                    getRequest,
-                    object : ActionListener<GetResponse> {
+                val getRequest = GetDataObjectRequest.builder()
+                    .index(ScheduledJob.SCHEDULED_JOBS_INDEX)
+                    .id(execMonitorRequest.monitorId)
+                    .build()
+
+                sdkClient.getDataObjectAsync(getRequest).whenComplete(
+                    SdkClientUtils.wrapGetCompletion(object : ActionListener<GetResponse> {
                         override fun onResponse(response: GetResponse) {
                             if (!response.isExists) {
                                 actionListener.onFailure(
@@ -128,7 +134,7 @@ class TransportExecuteMonitorAction @Inject constructor(
                         override fun onFailure(t: Exception) {
                             actionListener.onFailure(AlertingException.wrap(t))
                         }
-                    }
+                    })
                 )
             } else {
                 val monitor = when (user?.name.isNullOrEmpty()) {
